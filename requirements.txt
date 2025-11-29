@@ -1,0 +1,23 @@
+# Credit Scoring Model - Python Requirements
+# Install with: pip install -r requirements.txt
+
+# Core Data Science Libraries
+pandas==2.3.3
+numpy==2.2.6
+scipy==1.15.3
+
+# Machine Learning
+scikit-learn==1.7.2
+xgboost==3.1.2
+
+# Data Visualization
+matplotlib==3.10.7
+seaborn==0.13.2
+
+# Jupyter Notebook
+jupyter==1.1.1
+ipykernel==7.1.0
+notebook==7.5.0
+
+# Optional: JupyterLab (enhanced notebook interface)
+jupyterlab==4.5.0
