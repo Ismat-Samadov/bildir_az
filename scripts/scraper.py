@@ -3,6 +3,8 @@
 bildir.az Company Scraper
 Scrapes all companies from bildir.az/sirketler/ and their detail pages.
 Output: data/data.csv
+
+Selectors verified against live HTML (2026-02).
 """
 
 import csv
@@ -10,7 +12,6 @@ import time
 import logging
 import os
 import re
-from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
@@ -18,8 +19,8 @@ from bs4 import BeautifulSoup
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-BASE_URL = "https://www.bildir.az"
-LIST_URL = f"{BASE_URL}/sirketler/"
+BASE_URL   = "https://www.bildir.az"
+LIST_URL   = f"{BASE_URL}/sirketler/"
 OUTPUT_CSV = os.path.join(os.path.dirname(__file__), "..", "data", "data.csv")
 
 HEADERS = {
@@ -29,12 +30,15 @@ HEADERS = {
         "Chrome/120.0.0.0 Safari/537.36"
     ),
     "Accept-Language": "az,en-US;q=0.9,en;q=0.8",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
-REQUEST_DELAY = 1.0   # seconds between requests
+REQUEST_DELAY = 1.2   # seconds between requests
 MAX_RETRIES   = 3
 TIMEOUT       = 15
+
+# Domains that belong to bildir.az itself (filter out from social/website)
+BILDIR_DOMAINS = {"bildir.az", "www.bildir.az", "facebook.com/bildir.az",
+                  "instagram.com/bildir.az", "linkedin.com/company/bildir-az"}
 
 CSV_FIELDS = [
     "slug",
@@ -68,7 +72,6 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-
 # ---------------------------------------------------------------------------
 # HTTP helper
 # ---------------------------------------------------------------------------
@@ -76,7 +79,7 @@ session = requests.Session()
 session.headers.update(HEADERS)
 
 
-def get(url: str) -> BeautifulSoup | None:
+def get(url: str):
     """Fetch a URL with retries; return BeautifulSoup or None on failure."""
     for attempt in range(1, MAX_RETRIES + 1):
         try:
@@ -95,75 +98,26 @@ def get(url: str) -> BeautifulSoup | None:
 # Listing page – collect slugs
 # ---------------------------------------------------------------------------
 def get_total_pages(soup: BeautifulSoup) -> int:
-    """Parse pagination to find the last page number."""
-    # Look for pagination links with page numbers
-    pagination = soup.select("ul.pagination a, .pagination a, a[href*='page=']")
     max_page = 1
-    for tag in pagination:
-        href = tag.get("href", "")
-        m = re.search(r"page=(\d+)", href)
+    for a in soup.select("a[href*='page=']"):
+        m = re.search(r"page=(\d+)", a.get("href", ""))
         if m:
             max_page = max(max_page, int(m.group(1)))
-    # Also check text like "106" inside pagination spans
-    for tag in soup.select("ul.pagination li, .pagination li"):
-        txt = tag.get_text(strip=True)
-        if txt.isdigit():
-            max_page = max(max_page, int(txt))
     return max_page
 
 
-def parse_listing_page(soup: BeautifulSoup) -> list[dict]:
-    """Return list of {slug, name, category, rating, review_count} from a listing page."""
+def parse_listing_page(soup: BeautifulSoup) -> list:
     companies = []
     for anchor in soup.select("a.company-wrapper"):
-        href = anchor.get("href", "")
-        slug = href.strip("/").split("/")[-1] if href else ""
+        href = anchor.get("href", "").strip("/")
+        slug = href.split("/")[-1] if href else ""
         if not slug:
             continue
-
-        name_tag = anchor.select_one("h5")
-        name = name_tag.get_text(strip=True) if name_tag else ""
-
-        # Category is usually the first <p> or a span after the name
-        category = ""
-        for p in anchor.select("p"):
-            txt = p.get_text(strip=True)
-            if txt and "Rəy" not in txt and "www" not in txt:
-                category = txt
-                break
-
-        # Rating number
-        rating_tag = anchor.select_one(".company-rating-number, .rating-number")
-        rating = ""
-        if rating_tag:
-            rating = rating_tag.get_text(strip=True).replace(",", ".")
-        else:
-            # Try to grab the first float-like text node near stars
-            for span in anchor.select("span, div"):
-                t = span.get_text(strip=True).replace(",", ".")
-                if re.match(r"^\d\.\d$", t):
-                    rating = t
-                    break
-
-        # Review count
-        review_count = ""
-        full_text = anchor.get_text(" ", strip=True)
-        m = re.search(r"Rəy\s*say[ıi]\s*:\s*(\d+)", full_text, re.IGNORECASE)
-        if m:
-            review_count = m.group(1)
-
-        companies.append({
-            "slug": slug,
-            "name": name,
-            "category": category,
-            "rating_listing": rating,
-            "review_count_listing": review_count,
-        })
+        companies.append({"slug": slug})
     return companies
 
 
-def collect_all_slugs() -> list[dict]:
-    """Iterate all listing pages and return company stubs."""
+def collect_all_slugs() -> list:
     log.info("Fetching page 1 to detect total pages …")
     soup = get(f"{LIST_URL}?page=1")
     if soup is None:
@@ -173,15 +127,14 @@ def collect_all_slugs() -> list[dict]:
     total = get_total_pages(soup)
     log.info("Total pages detected: %d", total)
 
-    all_companies: list[dict] = []
-    all_companies.extend(parse_listing_page(soup))
+    all_companies = list(parse_listing_page(soup))
     time.sleep(REQUEST_DELAY)
 
     for page in range(2, total + 1):
         log.info("Listing page %d/%d …", page, total)
-        soup = get(f"{LIST_URL}?page={page}")
-        if soup:
-            all_companies.extend(parse_listing_page(soup))
+        s = get(f"{LIST_URL}?page={page}")
+        if s:
+            all_companies.extend(parse_listing_page(s))
         time.sleep(REQUEST_DELAY)
 
     log.info("Collected %d company slugs.", len(all_companies))
@@ -189,143 +142,138 @@ def collect_all_slugs() -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+BILDIR_SOCIAL = {
+    "facebook.com/bildir",
+    "instagram.com/bildir",
+    "linkedin.com/company/bildir",
+}
+
+
+def is_bildir_link(url: str) -> bool:
+    """Return True if the URL belongs to bildir.az itself."""
+    lower = url.lower()
+    if "bildir.az" in lower and not any(
+        s in lower for s in ["facebook.com", "instagram.com", "linkedin.com",
+                              "twitter.com", "youtube.com"]
+    ):
+        return True
+    return any(s in lower for s in BILDIR_SOCIAL)
+
+
+def pct_from_style(style: str) -> str:
+    """Extract percentage value from CSS style like 'width: 22.7%'."""
+    m = re.search(r"([\d.]+)%", style)
+    return m.group(1) if m else ""
+
+
+# ---------------------------------------------------------------------------
 # Company detail page
 # ---------------------------------------------------------------------------
-def _text(soup: BeautifulSoup, *selectors) -> str:
-    for sel in selectors:
-        tag = soup.select_one(sel)
-        if tag:
-            return tag.get_text(strip=True)
-    return ""
-
-
-def _pct(text: str) -> str:
-    """Extract numeric percentage from strings like '54,5%' → '54.5'."""
-    m = re.search(r"([\d,\.]+)\s*%", text)
-    if m:
-        return m.group(1).replace(",", ".")
-    m = re.search(r"([\d,\.]+)", text)
-    if m:
-        return m.group(1).replace(",", ".")
-    return ""
-
-
 def parse_company_page(slug: str) -> dict:
-    """Fetch and parse a company detail page."""
     url = f"{BASE_URL}/{slug}/"
     soup = get(url)
-    data: dict = {f: "" for f in CSV_FIELDS}
+    data = {f: "" for f in CSV_FIELDS}
     data["slug"] = slug
     data["profile_url"] = url
 
     if soup is None:
         return data
 
-    # Name
-    data["name"] = _text(soup,
-        "h1.company-name", "h1", ".company-title h1", ".company-info h1")
+    # ---- Name -------------------------------------------------------
+    name_div = soup.select_one("#company-name h1")
+    if name_div:
+        span = name_div.find("span", class_="title-span")
+        if span:
+            span.decompose()
+        data["name"] = name_div.get_text(strip=True)
 
-    # Category
-    data["category"] = _text(soup,
-        ".company-category", ".category-name", ".company-type")
+    # ---- Category (from breadcrumb) ---------------------------------
+    crumb = soup.select_one(".breadcrumb")
+    if crumb:
+        links = crumb.select("a")
+        # breadcrumb: Ana Səhifə > Şirkətlər > Category > (company)
+        if len(links) >= 3:
+            data["category"] = links[-1].get_text(strip=True)
 
-    # Founded
-    founded_tag = soup.find(string=re.compile(r"Quruluş tarixi|Founded|Yaranma", re.I))
-    if founded_tag:
-        parent = founded_tag.parent
-        sibling = parent.find_next_sibling()
-        if sibling:
-            data["founded"] = sibling.get_text(strip=True)
-        else:
-            data["founded"] = parent.get_text(strip=True)
+    # ---- Rating -----------------------------------------------------
+    rating_el = soup.select_one(".star-rating__result span")
+    if rating_el:
+        data["overall_rating"] = rating_el.get_text(strip=True).replace(",", ".")
 
-    # Description
-    data["description"] = _text(soup,
-        ".company-description p", ".about-company p",
-        ".company-about", "#about p", ".description")
-
-    # Website
-    website_tag = soup.select_one("a.website-url-btn, [data-href], .company-website a")
-    if website_tag:
-        data["website"] = (
-            website_tag.get("data-href")
-            or website_tag.get("href", "")
-        )
-    if not data["website"]:
-        for a in soup.select("a[href^='http']"):
-            href = a.get("href", "")
-            if BASE_URL not in href and "bildir" not in href:
-                txt = a.get_text(strip=True).lower()
-                if not any(s in txt for s in ["facebook", "instagram", "linkedin", "twitter", "youtube"]):
-                    data["website"] = href
-                    break
-
-    # Social media
-    social_map = {
-        "facebook": "facebook",
-        "instagram": "instagram",
-        "linkedin": "linkedin",
-        "youtube": "youtube",
-        "twitter": "twitter",
-    }
-    for platform, key in social_map.items():
-        tag = soup.select_one(f"a[href*='{platform}']")
-        if tag:
-            data[key] = tag.get("href", "")
-
-    # Overall rating
-    rating_tag = soup.select_one(
-        ".overall-rating .rating-number, .company-rating span.number, "
-        ".rating-score, .stars-number, .company-score"
-    )
-    if rating_tag:
-        data["overall_rating"] = rating_tag.get_text(strip=True).replace(",", ".")
-
-    # Total reviews
-    reviews_tag = soup.select_one(
-        ".total-reviews, .reviews-count, .review-count strong"
-    )
-    if reviews_tag:
-        data["total_reviews"] = re.sub(r"\D", "", reviews_tag.get_text())
-    else:
-        m = re.search(r"(\d+)\s*rəy", soup.get_text(), re.IGNORECASE)
+    # ---- Total reviews ----------------------------------------------
+    rev_stat = soup.select_one("#review-statistics")
+    if rev_stat:
+        m = re.search(r"(\d+)\s*rəy", rev_stat.get_text())
         if m:
             data["total_reviews"] = m.group(1)
 
-    # Stats: response rate, resolved, loyalty
-    full_text = soup.get_text(" ", strip=True)
+    # ---- Response rate, resolved, loyalty ---------------------------
+    reply_el = soup.select_one(".reply-percent h6")
+    if reply_el:
+        data["response_rate_pct"] = reply_el.get_text(strip=True).replace("%", "").strip()
 
-    patterns = {
-        "response_rate_pct":      r"Cavab\s+nisbəti[^\d]*([\d,\.]+)\s*%",
-        "resolved_complaints_pct": r"Həll\s+edilmiş[^\d]*([\d,\.]+)\s*%",
-        "customer_loyalty_pct":   r"Müştəri\s+loyallığı[^\d\-]*([\-\d,\.]+)\s*%",
-    }
-    for key, pat in patterns.items():
-        m = re.search(pat, full_text, re.IGNORECASE)
+    solved_el = soup.select_one(".solved-complaints h6")
+    if solved_el:
+        data["resolved_complaints_pct"] = solved_el.get_text(strip=True).replace("%", "").strip()
+
+    loyalty_el = soup.select_one(".customer-loyalty h6")
+    if loyalty_el:
+        data["customer_loyalty_pct"] = loyalty_el.get_text(strip=True).replace("%", "").strip()
+
+    # ---- Star distribution (5 progress bars in order 5→1) -----------
+    bars = soup.select("div.jesus-progress")
+    star_keys = ["star5_pct", "star4_pct", "star3_pct", "star2_pct", "star1_pct"]
+    for i, bar in enumerate(bars[:5]):
+        style = bar.get("style", "")
+        data[star_keys[i]] = pct_from_style(style)
+
+    # ---- Description and Founded ------------------------------------
+    desc_el = soup.select_one("p.short")
+    if desc_el:
+        desc_text = desc_el.get_text(strip=True)
+        data["description"] = desc_text
+        # Extract founded date: "10 yanvar 1992" or just year
+        m = re.search(r"\d{1,2}\s+\w+\s+\d{4}", desc_text)
         if m:
-            data[key] = m.group(1).replace(",", ".")
+            data["founded"] = m.group(0)
+        else:
+            m2 = re.search(r"\b(19|20)\d{2}\b", desc_text)
+            if m2:
+                data["founded"] = m2.group(0)
 
-    # Star distribution  – look for elements with % next to star icons
-    # Typical markup: <div class="star-row"><span>5 ulduz</span><span>54,5%</span></div>
-    star_keys = {5: "star5_pct", 4: "star4_pct", 3: "star3_pct", 2: "star2_pct", 1: "star1_pct"}
-    for row in soup.select(".star-row, .rating-row, .review-bar, li.star-item"):
-        txt = row.get_text(" ", strip=True)
-        for star_n, col in star_keys.items():
-            if str(star_n) in txt:
-                pct = _pct(txt)
-                if pct and not data[col]:
-                    data[col] = pct
-                break
+    # ---- Website ----------------------------------------------------
+    container = soup.select_one(".company-about-container")
+    if container:
+        for a in container.find_all("a", href=True):
+            href = a["href"]
+            if not href.startswith("http"):
+                continue
+            if "bildir.az" in href:
+                continue
+            if any(s in href.lower() for s in ["facebook", "instagram",
+                                                "linkedin", "twitter", "youtube"]):
+                continue
+            data["website"] = href
+            break
 
-    # Fallback: scan full text for patterns like "5 ulduz ... 22,7%"
-    for star_n, col in star_keys.items():
-        if not data[col]:
-            m = re.search(
-                rf"{star_n}\s*(?:ulduz|star)[^\d]*?([\d,\.]+)\s*%",
-                full_text, re.IGNORECASE
-            )
-            if m:
-                data[col] = m.group(1).replace(",", ".")
+    # ---- Social links (only real company links) ---------------------
+    social_targets = {
+        "facebook": "facebook",
+        "instagram": "instagram",
+        "linkedin": "linkedin",
+        "youtube":  "youtube",
+        "twitter":  "twitter",
+    }
+    if container:
+        for a in container.find_all("a", href=True):
+            href = a["href"]
+            if is_bildir_link(href):
+                continue
+            for platform, key in social_targets.items():
+                if platform in href.lower() and not data[key]:
+                    data[key] = href
 
     return data
 
@@ -336,45 +284,32 @@ def parse_company_page(slug: str) -> dict:
 def main():
     os.makedirs(os.path.dirname(OUTPUT_CSV), exist_ok=True)
 
-    # Step 1: Collect all slugs from listing pages
+    # Step 1: Collect all slugs
     stubs = collect_all_slugs()
     if not stubs:
         log.error("No companies found – aborting.")
         return
 
-    # Remove duplicates (keep order)
+    # Deduplicate preserving order
     seen = set()
-    unique_stubs = []
+    unique = []
     for s in stubs:
         if s["slug"] not in seen:
             seen.add(s["slug"])
-            unique_stubs.append(s)
-    log.info("Unique companies after dedup: %d", len(unique_stubs))
+            unique.append(s)
+    log.info("Unique companies after dedup: %d", len(unique))
 
-    # Step 2: Scrape each company detail page and write CSV incrementally
+    # Step 2: Scrape detail pages, write CSV incrementally
     with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=CSV_FIELDS, extrasaction="ignore")
         writer.writeheader()
 
-        for idx, stub in enumerate(unique_stubs, 1):
+        for idx, stub in enumerate(unique, 1):
             slug = stub["slug"]
-            log.info("[%d/%d] Scraping %s …", idx, len(unique_stubs), slug)
-
+            log.info("[%d/%d] Scraping %s …", idx, len(unique), slug)
             detail = parse_company_page(slug)
-
-            # Backfill name/category from listing if detail page missed them
-            if not detail["name"]:
-                detail["name"] = stub.get("name", "")
-            if not detail["category"]:
-                detail["category"] = stub.get("category", "")
-            if not detail["overall_rating"]:
-                detail["overall_rating"] = stub.get("rating_listing", "")
-            if not detail["total_reviews"]:
-                detail["total_reviews"] = stub.get("review_count_listing", "")
-
             writer.writerow(detail)
             fh.flush()
-
             time.sleep(REQUEST_DELAY)
 
     log.info("Done! CSV saved to: %s", OUTPUT_CSV)
